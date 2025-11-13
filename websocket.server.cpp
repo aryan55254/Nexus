@@ -9,6 +9,7 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
+#include <thread>
 
 #include <openssl/sha.h>
 #include <openssl/bio.h>
@@ -126,7 +127,7 @@ void send_websocket_frame(int client_socket, const std::string &payload, uint8_t
     std::cout << "ECHOED: " << payload << std::endl;
 }
 
-void handle_websocket_connection(int client_socket)
+void handle_websocket_frame(int client_socket)
 {
     char buffer[BUFFER_size];
 
@@ -259,6 +260,68 @@ connection_close:
     std::cout << "Connection closed." << std::endl;
 }
 
+void handle_new_connection(int client_socket)
+{
+    // Handshake Logic
+    char buffer[BUFFER_size] = {0};
+    ssize_t bytes_received = recv(client_socket, buffer, BUFFER_size - 1, 0);
+
+    if (bytes_received <= 0)
+    {
+        perror("recv failed or client disconnected before handshake");
+        close(client_socket);
+        return;
+    }
+
+    std::cout << "--- Client Handshake Request (Socket " << client_socket << ") ---" << std::endl;
+    std::cout << buffer << std::endl;
+    std::cout << "--------------------------------" << std::endl;
+
+    std::map<std::string, std::string> headers = parse_http_request(buffer);
+
+    std::string connection_value;
+    if (headers.find("connection") != headers.end())
+    {
+        connection_value = headers["connection"];
+        std::transform(connection_value.begin(), connection_value.end(), connection_value.begin(), ::tolower);
+    }
+    std::string upgrade_value;
+    if (headers.find("upgrade") != headers.end())
+    {
+        upgrade_value = headers["upgrade"];
+        std::transform(upgrade_value.begin(), upgrade_value.end(), upgrade_value.begin(), ::tolower);
+    }
+    // check for ws headers
+    if (headers.find("upgrade") == headers.end() || upgrade_value != "websocket" || headers.find("sec-websocket-key") == headers.end() ||
+        headers.find("sec-websocket-version") == headers.end() || headers["sec-websocket-version"] != "13" || headers.find("connection") == headers.end() || connection_value.find("upgrade") == std::string::npos)
+    {
+        std::cerr << "Invalid HTTP request (not a WebSocket upgrade) on Socket " << client_socket << std::endl;
+        const char *http_response = "HTTP/1.1 400 Bad Request\r\n\r\n";
+        send(client_socket, http_response, strlen(http_response), 0);
+        close(client_socket);
+        return;
+    }
+    std::string client_key = headers["sec-websocket-key"];
+    std::string accept_key = generate_websocket_accept_key(client_key);
+    std::string response =
+        "HTTP/1.1 101 Switching Protocols\r\n"
+        "Upgrade: websocket\r\n"
+        "Connection: Upgrade\r\n"
+        "Sec-WebSocket-Accept: " +
+        accept_key + "\r\n"
+                     "\r\n";
+
+    ssize_t bytes_sent = send(client_socket, response.c_str(), response.length(), 0);
+    if (bytes_sent < 0)
+    {
+        perror("Handshake send failed");
+        close(client_socket);
+        return; // This ends the thread
+    }
+    std::cout << "Handshake successful for Socket " << client_socket << "." << std::endl;
+    handle_websocket_frame(client_socket);
+}
+
 int main()
 {
     // initializing variables
@@ -320,63 +383,8 @@ int main()
         inet_ntop(AF_INET, &client_addr.sin_addr, client_ip, INET_ADDRSTRLEN);
         std::cout << "new connection from " << client_ip << std::endl;
 
-        char buffer[BUFFER_size] = {0};
-        ssize_t bytes_received = recv(client_socket, buffer, BUFFER_size - 1, 0);
-        if (bytes_received < 0)
-        {
-            perror("recv failed");
-            close(client_socket);
-            continue;
-        }
-        else if (bytes_received == 0)
-        {
-            std::cout << "Client disconnected before sending data" << std::endl;
-            close(client_socket);
-            continue;
-        }
-
-        std::cout << "--- Client Handshake Request ---" << std::endl;
-        std::cout << buffer << std::endl;
-        std::cout << "--------------------------------" << std::endl;
-
-        // parse http requests
-
-        std::map<std::string, std::string> headers = parse_http_request(buffer);
-
-        // check for ws headers
-        if (headers.find("upgrade") == headers.end() || headers["upgrade"] != "websocket" || headers.find("sec-websocket-key") == headers.end() ||
-            headers.find("sec-websocket-version") == headers.end() || headers["sec-websocket-version"] != "13" || headers.find("connection") == headers.end() || headers["connection"].find("upgrade") == std::string::npos)
-        {
-            std::cerr << "Invalid HTTP request (not a WebSocket upgrade)" << std::endl;
-            const char *http_response = "HTTP/1.1 400 Bad Request\r\n\r\n";
-            send(client_socket, http_response, strlen(http_response), 0);
-            close(client_socket);
-            continue;
-        }
-        std::string client_key = headers["sec-websocket-key"];
-        std::string accept_key = generate_websocket_accept_key(client_key);
-        std::string response =
-            "HTTP/1.1 101 Switching Protocols\r\n"
-            "Upgrade: websocket\r\n"
-            "Connection: Upgrade\r\n"
-            "Sec-WebSocket-Accept: " +
-            accept_key + "\r\n"
-                         "\r\n";
-
-        std::cout << "--- Server Handshake Response ---" << std::endl;
-        std::cout << response << std::endl;
-        std::cout << "---------------------------------" << std::endl;
-
-        ssize_t bytes_sent = send(client_socket, response.c_str(), response.length(), 0);
-        if (bytes_sent < 0)
-        {
-            perror("Handshake send failed");
-            close(client_socket);
-            continue;
-        }
-        std::cout << "Handshake successful. WebSocket connection established." << std::endl;
-
-        handle_websocket_connection(client_socket);
+        std::thread client_thread(handle_new_connection, client_socket);
+        client_thread.detach();
     }
     close(server_fd);
     return 0;
