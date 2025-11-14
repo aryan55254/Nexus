@@ -10,6 +10,8 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <thread>
+#include <mutex>
+#include <set>
 
 #include <openssl/sha.h>
 #include <openssl/bio.h>
@@ -21,6 +23,20 @@
 
 #define PORT 8080
 #define BUFFER_size 4096
+
+std::set<int> g_client_sockets;
+std::mutex g_sockets_mutex;
+
+void safe_client_socket_addition(int client__socket)
+{
+    std::lock_guard<std::mutex> gaurd(g_sockets_mutex);
+    g_client_sockets.insert(client__socket);
+};
+void safe_client_socket_removal(int client__socket)
+{
+    std::lock_guard<std::mutex> gaurd(g_sockets_mutex);
+    g_client_sockets.erase(client__socket);
+};
 
 // helper functions
 // encodes raw bytes into a base64 string
@@ -256,6 +272,7 @@ void handle_websocket_frame(int client_socket)
     }
 
 connection_close:
+    safe_client_socket_removal(client_socket);
     close(client_socket);
     std::cout << "Connection closed." << std::endl;
 }
@@ -319,6 +336,7 @@ void handle_new_connection(int client_socket)
         return; // This ends the thread
     }
     std::cout << "Handshake successful for Socket " << client_socket << "." << std::endl;
+    safe_client_socket_addition(client_socket);
     handle_websocket_frame(client_socket);
 }
 
