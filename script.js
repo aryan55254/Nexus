@@ -10,7 +10,7 @@ const wsUrl = "ws://localhost:8080";
 
 function log(message) {
   outputDiv.textContent += message + "\n";
-  outputDiv.scrollTop = outputDiv.scrollHeight; // Auto-scroll
+  outputDiv.scrollTop = outputDiv.scrollHeight;
 }
 
 function updateUI(connected) {
@@ -47,7 +47,7 @@ connectBtn.onclick = function () {
   };
 
   ws.onmessage = function (event) {
-    log("Received: " + event.data);
+    log(event.data);
   };
 };
 
@@ -62,14 +62,13 @@ sendBtn.onclick = function () {
   if (ws) {
     const message = messageInput.value;
     if (message) {
-      log("Sent: " + message);
+      log("You: " + message);
       ws.send(message);
       messageInput.value = "";
     }
   }
 };
 
-// Allow sending with Enter key
 messageInput.addEventListener("keydown", function (event) {
   if (event.key === "Enter" && !sendBtn.disabled) {
     sendBtn.click();
