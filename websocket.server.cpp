@@ -10,6 +10,8 @@
 #include <netinet/in.h>
 #include <unistd.h>
 #include <thread>
+#include <mutex>
+#include <set>
 
 #include <openssl/sha.h>
 #include <openssl/bio.h>
@@ -21,6 +23,20 @@
 
 #define PORT 8080
 #define BUFFER_size 4096
+
+std::set<int> g_client_sockets;
+std::mutex g_sockets_mutex;
+
+void safe_client_socket_addition(int client__socket)
+{
+    std::lock_guard<std::mutex> gaurd(g_sockets_mutex);
+    g_client_sockets.insert(client__socket);
+};
+void safe_client_socket_removal(int client__socket)
+{
+    std::lock_guard<std::mutex> gaurd(g_sockets_mutex);
+    g_client_sockets.erase(client__socket);
+};
 
 // helper functions
 // encodes raw bytes into a base64 string
@@ -124,7 +140,7 @@ void send_websocket_frame(int client_socket, const std::string &payload, uint8_t
         return;
     }
 
-    std::cout << "ECHOED: " << payload << std::endl;
+    std::cout << "SENT: " << payload << std::endl;
 }
 
 void handle_websocket_frame(int client_socket)
@@ -235,9 +251,22 @@ void handle_websocket_frame(int client_socket)
         switch (opcode)
         {
         case 0x1:
-            std::cout << "RECEIVED: " << payload_text << std::endl;
-            send_websocket_frame(client_socket, payload_text, 0x1);
+        {
+            std::cout << "RECEIVED" << client_socket << ": " << payload_text << std::endl;
+
+            std::set<int> clients_to_send_to;
+            {
+                std::lock_guard<std::mutex> guard(g_sockets_mutex);
+                clients_to_send_to = g_client_sockets;
+            }
+            clients_to_send_to.erase(client_socket);
+            for (int socket_fd : clients_to_send_to)
+            {
+                std::string message_for_recipient = "Someone: " + payload_text;
+                send_websocket_frame(socket_fd, message_for_recipient, 0x1);
+            }
             break;
+        }
 
         case 0x8:
             std::cout << "RECEIVED: Client Close Frame" << std::endl;
@@ -256,6 +285,7 @@ void handle_websocket_frame(int client_socket)
     }
 
 connection_close:
+    safe_client_socket_removal(client_socket);
     close(client_socket);
     std::cout << "Connection closed." << std::endl;
 }
@@ -319,6 +349,7 @@ void handle_new_connection(int client_socket)
         return; // This ends the thread
     }
     std::cout << "Handshake successful for Socket " << client_socket << "." << std::endl;
+    safe_client_socket_addition(client_socket);
     handle_websocket_frame(client_socket);
 }
 
