@@ -74,19 +74,18 @@ You should see: `Server listening on port 8080...`
 
 ### 2\. Load Test (1,000+ Clients)
 
-The `node-test` directory contains a script to simulate concurrent users.
+The `nexus_test` directory contains a script to simulate concurrent users.
 
-1.  Inside `test.js`, change the `NUM_CLIENTS` constant to `1000`.
-2.  Navigate to the test directory:
+1.  Navigate to the test directory:
     ```bash
-    cd node-test
+    cd nexus_test
     ```
-3.  Install the `ws` library:
+2.  Install the dependencies:
     ```bash
-    npm install ws
+    npm install
     ```
-4.  Run the test script (while your C++ server is running):
+3.  Run the test script (while your C++ server is running):
     ```bash
     node test.js
     ```
-5.  Observe the console output as your server handles the 17k msg/s load.
+4.  Observe the console output as your server handles the 17k msg/s(expect 11k - 12k average highest it went was 17k on my computer) load.
