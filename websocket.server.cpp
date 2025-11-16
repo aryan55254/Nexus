@@ -145,142 +145,156 @@ void send_websocket_frame(int client_socket, const std::string &payload, uint8_t
 
 void handle_websocket_frame(int client_socket)
 {
-    char buffer[BUFFER_size];
+    std::vector<uint8_t> persistent_buffer;
+    char temp_buffer[BUFFER_size];
 
     while (true)
     {
-        memset(buffer, 0, BUFFER_size);
+        memset(temp_buffer, 0, BUFFER_size);
 
-        ssize_t bytes_received = recv(client_socket, buffer, BUFFER_size, 0);
+        ssize_t bytes_received = recv(client_socket, temp_buffer, BUFFER_size, 0);
 
         if (bytes_received <= 0)
         {
             std::cout << "Client disconnected." << std::endl;
             break;
         }
-        if (bytes_received < 2)
+        persistent_buffer.insert(persistent_buffer.end(),
+                                 temp_buffer,
+                                 temp_buffer + bytes_received);
+
+        while (true)
         {
-            std::cerr << "Error: Incomplete frame header" << std::endl;
-            break;
-        }
-
-        const uint8_t *frame = (const uint8_t *)buffer;
-
-        bool fin = (frame[0] & 0x80) != 0;
-        bool rsv = (frame[0] & 0x70) != 0;
-
-        if (rsv)
-        {
-            std::cerr << "Error: RSV bits set without negotiated extension. Closing connection." << std::endl;
-            break;
-        }
-
-        if (!fin)
-        {
-            std::cerr << "Error: Fragmented frames not supported. Closing connection." << std::endl;
-            break;
-        }
-
-        uint8_t opcode = frame[0] & 0x0F;
-
-        // Byte 2: MASK bit and Payload Len
-        bool is_masked = (frame[1] & 0x80) != 0;
-        uint64_t payload_len = frame[1] & 0x7F;
-
-        // Check for required masking
-        if (!is_masked)
-        {
-            std::cerr << "Error: Client frame not masked. Closing connection." << std::endl;
-            break;
-        }
-
-        size_t header_offset = 2;
-
-        // Handle extended payload lengths
-        if (payload_len == 126)
-        {
-            if (bytes_received < header_offset + 2)
+            const uint8_t *frame = persistent_buffer.data();
+            if (persistent_buffer.size() < 2)
             {
-                std::cerr << "Incomplete frame" << std::endl;
                 break;
             }
-            uint16_t len16;
-            memcpy(&len16, &frame[header_offset], 2);
-            payload_len = ntohs(len16);
-            header_offset += 2;
-        }
-        else if (payload_len == 127)
-        {
-            if (bytes_received < header_offset + 8)
+
+            bool fin = (frame[0] & 0x80) != 0;
+            bool rsv = (frame[0] & 0x70) != 0;
+
+            if (rsv)
             {
-                std::cerr << "Incomplete frame" << std::endl;
+                std::cerr << "Error: RSV bits set without negotiated extension. Closing connection." << std::endl;
                 break;
             }
-            uint64_t len64;
-            memcpy(&len64, &frame[header_offset], 8);
-            payload_len = be64toh(len64);
-            header_offset += 8;
-        }
 
-        if (bytes_received < header_offset + 4)
-        {
-            std::cerr << "Incomplete frame (missing masking key)" << std::endl;
-            break;
-        }
-        uint8_t masking_key[4];
-        memcpy(masking_key, &frame[header_offset], 4);
-        header_offset += 4;
-
-        if ((size_t)bytes_received < header_offset + payload_len)
-        {
-            std::cerr << "Incomplete frame (missing payload data)" << std::endl;
-            break;
-        }
-
-        std::vector<char> unmasked_payload;
-        unmasked_payload.resize(payload_len);
-
-        const uint8_t *masked_payload = &frame[header_offset];
-
-        for (size_t i = 0; i < payload_len; ++i)
-        {
-            unmasked_payload[i] = masked_payload[i] ^ masking_key[i % 4];
-        }
-        std::string payload_text(unmasked_payload.begin(), unmasked_payload.end());
-
-        switch (opcode)
-        {
-        case 0x1:
-        {
-            std::cout << "RECEIVED" << client_socket << ": " << payload_text << std::endl;
-
-            std::set<int> clients_to_send_to;
+            if (!fin)
             {
-                std::lock_guard<std::mutex> guard(g_sockets_mutex);
-                clients_to_send_to = g_client_sockets;
+                std::cerr << "Error: Fragmented frames not supported. Closing connection." << std::endl;
+                break;
             }
-            clients_to_send_to.erase(client_socket);
-            for (int socket_fd : clients_to_send_to)
+
+            uint8_t opcode = frame[0] & 0x0F;
+
+            // Byte 2: MASK bit and Payload Len
+            bool is_masked = (frame[1] & 0x80) != 0;
+            uint64_t payload_len = frame[1] & 0x7F;
+
+            // Check for required masking
+            if (!is_masked)
             {
-                std::string message_for_recipient = "Someone: " + payload_text;
-                send_websocket_frame(socket_fd, message_for_recipient, 0x1);
+                std::cerr << "Error: Client frame not masked. Closing connection." << std::endl;
+                break;
             }
-            break;
-        }
 
-        case 0x8:
-            std::cout << "RECEIVED: Client Close Frame" << std::endl;
-            send_websocket_frame(client_socket, "", 0x8);
-            goto connection_close;
+            size_t header_offset = 2;
 
-        case 0x9:
-            std::cout << "RECEIVED: Ping Frame" << std::endl;
-            send_websocket_frame(client_socket, payload_text, 0xA);
-            break;
+            // Handle extended payload lengths
+            if (payload_len == 126)
+            {
+                if (persistent_buffer.size() < header_offset + 2)
+                {
+                    std::cerr << "Incomplete frame" << std::endl;
+                    break;
+                }
+                uint16_t len16;
+                memcpy(&len16, &frame[header_offset], 2);
+                payload_len = ntohs(len16);
+                header_offset += 2;
+            }
+            else if (payload_len == 127)
+            {
+                if (persistent_buffer.size() < header_offset + 8)
+                {
+                    std::cerr << "Incomplete frame" << std::endl;
+                    break;
+                }
+                uint64_t len64;
+                memcpy(&len64, &frame[header_offset], 8);
+                payload_len = be64toh(len64);
+                header_offset += 8;
+            }
 
-        default:
-            std::cout << "RECEIVED: Unhandled Opcode " << (int)opcode << std::endl;
-            break;
+            if (persistent_buffer.size() < header_offset + 4)
+            {
+                std::cerr << "Incomplete frame (missing masking key)" << std::endl;
+                break;
+            }
+            uint8_t masking_key[4];
+            memcpy(masking_key, &frame[header_offset], 4);
+            header_offset += 4;
+
+            if ((size_t)persistent_buffer.size() < header_offset + payload_len)
+            {
+                std::cerr << "Incomplete frame (missing payload data)" << std::endl;
+                break;
+            }
+
+            std::vector<char> unmasked_payload;
+            unmasked_payload.resize(payload_len);
+
+            const uint8_t *masked_payload = &frame[header_offset];
+
+            for (size_t i = 0; i < payload_len; ++i)
+            {
+                unmasked_payload[i] = masked_payload[i] ^ masking_key[i % 4];
+            }
+            std::string payload_text(unmasked_payload.begin(), unmasked_payload.end());
+
+            switch (opcode)
+            {
+            case 0x1:
+            {
+                std::cout << "RECEIVED" << client_socket << ": " << payload_text << std::endl;
+
+                std::set<int> clients_to_send_to;
+                {
+                    std::lock_guard<std::mutex> guard(g_sockets_mutex);
+                    clients_to_send_to = g_client_sockets;
+                }
+                clients_to_send_to.erase(client_socket);
+                for (int socket_fd : clients_to_send_to)
+                {
+                    std::string message_for_recipient = "Someone: " + payload_text;
+                    send_websocket_frame(socket_fd, message_for_recipient, 0x1);
+                }
+                break;
+            }
+
+            case 0x8:
+                std::cout << "RECEIVED: Client Close Frame" << std::endl;
+                send_websocket_frame(client_socket, "", 0x8);
+                goto connection_close;
+
+            case 0x9:
+                std::cout << "RECEIVED: Ping Frame" << std::endl;
+                send_websocket_frame(client_socket, payload_text, 0xA);
+                break;
+
+            default:
+                std::cout << "RECEIVED: Unhandled Opcode " << (int)opcode << std::endl;
+                break;
+            }
+            uint64_t total_frame_size = header_offset + payload_len;
+            if (persistent_buffer.size() < total_frame_size)
+            {
+
+                break;
+            }
+            persistent_buffer.erase(persistent_buffer.begin(),
+                                    persistent_buffer.begin() + total_frame_size);
         }
     }
 
