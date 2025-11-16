@@ -23,6 +23,7 @@
 
 #define PORT 8080
 #define BUFFER_size 4096
+#define MAX_PAYLOAD_SIZE 10485760
 
 std::set<int> g_client_sockets;
 std::mutex g_sockets_mutex;
@@ -163,6 +164,7 @@ void handle_websocket_frame(int client_socket)
                                  temp_buffer,
                                  temp_buffer + bytes_received);
 
+        bool fatal_protocol_error = false;
         while (true)
         {
             const uint8_t *frame = persistent_buffer.data();
@@ -177,12 +179,14 @@ void handle_websocket_frame(int client_socket)
             if (rsv)
             {
                 std::cerr << "Error: RSV bits set without negotiated extension. Closing connection." << std::endl;
+                fatal_protocol_error = true;
                 break;
             }
 
             if (!fin)
             {
                 std::cerr << "Error: Fragmented frames not supported. Closing connection." << std::endl;
+                fatal_protocol_error = true;
                 break;
             }
 
@@ -196,6 +200,7 @@ void handle_websocket_frame(int client_socket)
             if (!is_masked)
             {
                 std::cerr << "Error: Client frame not masked. Closing connection." << std::endl;
+                fatal_protocol_error = true;
                 break;
             }
 
@@ -209,6 +214,7 @@ void handle_websocket_frame(int client_socket)
                     std::cerr << "Incomplete frame" << std::endl;
                     break;
                 }
+
                 uint16_t len16;
                 memcpy(&len16, &frame[header_offset], 2);
                 payload_len = ntohs(len16);
@@ -225,6 +231,12 @@ void handle_websocket_frame(int client_socket)
                 memcpy(&len64, &frame[header_offset], 8);
                 payload_len = be64toh(len64);
                 header_offset += 8;
+            }
+            if (payload_len > MAX_PAYLOAD_SIZE)
+            {
+                std::cerr << "Error: Payload size exceeds limit. Closing connection." << std::endl;
+                send_websocket_frame(client_socket, "", 0x8);
+                goto connection_close;
             }
 
             if (persistent_buffer.size() < header_offset + 4)
@@ -246,6 +258,11 @@ void handle_websocket_frame(int client_socket)
             unmasked_payload.resize(payload_len);
 
             const uint8_t *masked_payload = &frame[header_offset];
+            uint64_t total_frame_size = header_offset + payload_len;
+            if (persistent_buffer.size() < total_frame_size)
+            {
+                break;
+            }
 
             for (size_t i = 0; i < payload_len; ++i)
             {
@@ -285,17 +302,15 @@ void handle_websocket_frame(int client_socket)
 
             default:
                 std::cout << "RECEIVED: Unhandled Opcode " << (int)opcode << std::endl;
+                fatal_protocol_error = true;
                 break;
             }
-            uint64_t total_frame_size = header_offset + payload_len;
-            if (persistent_buffer.size() < total_frame_size)
-            {
 
-                break;
-            }
             persistent_buffer.erase(persistent_buffer.begin(),
                                     persistent_buffer.begin() + total_frame_size);
         }
+        if (fatal_protocol_error)
+            break;
     }
 
 connection_close:
